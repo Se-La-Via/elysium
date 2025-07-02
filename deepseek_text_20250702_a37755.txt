@@ -1,8 +1,0 @@
-transaction-tracker/
-├── app.py
-├── db.py
-├── scheduler.py
-├── templates/
-│   └── leaderboard.html
-└── static/
-    └── style.css
