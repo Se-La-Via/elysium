@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TON Leaderboard</title>
+    <style>
+        * { box-sizing: border-box; font-family: Arial, sans-serif; }
+        body { max-width: 800px; margin: 0 auto; padding: 20px; }
+        h1 { text-align: center; color: #1a73e8; }
+        table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background-color: #f2f2f2; font-weight: bold; }
+        tr:hover { background-color: #f5f5f5; }
+        .loader { text-align: center; padding: 20px; }
+        .medal-1::before { content: "🥇 "; }
+        .medal-2::before { content: "🥈 "; }
+        .medal-3::before { content: "🥉 "; }
+        .last-update { text-align: center; color: #666; font-size: 0.9em; }
+        button { background: #1a73e8; color: white; border: none; padding: 10px 15px; cursor: pointer; }
+        button:hover { background: #0d62c9; }
+    </style>
+</head>
+<body>
+    <h1>TON Leaderboard</h1>
+    <div id="controls">
+        <button id="loadData">Загрузить данные сейчас</button>
+    </div>
+    <div id="leaderboard"></div>
+    <div id="lastUpdate" class="last-update"></div>
+
+    <script>
+        // Конфигурация
+        const API_URL = 'https://dialog-tbot.com/history/ft-transfers/?wallet_id=se_la_via.tg&direction=in&limit=200&skip=0';
+        const UPDATE_INTERVAL = 5 * 60 * 1000; // 5 минут
+        const DB_NAME = 'tonTransactionsDB';
+        const STORE_NAME = 'transactions';
+
+        // Инициализация базы данных
+        let db;
+        const initDB = new Promise((resolve) => {
+            const request = indexedDB.open(DB_NAME, 1);
+            
+            request.onupgradeneeded = (event) => {
+                db = event.target.result;
+                if (!db.objectStoreNames.contains(STORE_NAME)) {
+                    const store = db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+                    store.createIndex('wallet', 'wallet', { unique: false });
+                    store.createIndex('timestamp', 'timestamp', { unique: false });
+                }
+            };
+
+            request.onsuccess = (event) => {
+                db = event.target.result;
+                resolve();
+            };
+
+            request.onerror = (event) => {
+                console.error('Ошибка базы данных:', event.target.error);
+            };
+        });
+
+        // Сохранение транзакций в базу данных
+        async function saveTransactions(transactions) {
+            return new Promise((resolve) => {
+                const tx = db.transaction(STORE_NAME, 'readwrite');
+                const store = tx.objectStore(STORE_NAME);
+                
+                transactions.forEach(transaction => {
+                    store.put({
+                        id: transaction.id,
+                        timestamp: new Date(transaction.timestamp * 1000),
+                        wallet: transaction.from,
+                        token: transaction.token,
+                        amount: parseFloat(transaction.amount)
+                    });
+                });
+                
+                tx.oncomplete = () => {
+                    resolve(transactions.length);
+                };
+            });
+        }
+
+        // Загрузка данных из API
+        async function fetchTransactions() {
+            try {
+                const response = await fetch(API_URL, {
+                    headers: { 'Accept': 'application/json' }
+                });
+                
+                if (!response.ok) throw new Error('Ошибка сети');
+                
+                const data = await response.json();
+                return data.transfers || [];
+            } catch (error) {
+                console.error('Ошибка загрузки:', error);
+                return [];
+            }
+        }
+
+        // Расчет лидерборда
+        async function calculateLeaderboard() {
+            return new Promise((resolve) => {
+                const tx = db.transaction(STORE_NAME, 'readonly');
+                const store = tx.objectStore(STORE_NAME);
+                const index = store.index('wallet');
+                
+                const leaderboard = new Map();
+                
+                index.openCursor().onsuccess = (event) => {
+                    const cursor = event.target.result;
+                    if (cursor) {
+                        const { wallet, amount } = cursor.value;
+                        const current = leaderboard.get(wallet) || 0;
+                        leaderboard.set(wallet, current + amount);
+                        cursor.continue();
+                    } else {
+                        // Сортировка и выбор топ-10
+                        const sorted = [...leaderboard.entries()]
+                            .sort((a, b) => b[1] - a[1])
+                            .slice(0, 10);
+                        
+                        resolve(sorted);
+                    }
+                };
+            });
+        }
+
+        // Обновление данных и отображение
+        async function updateData() {
+            document.getElementById('leaderboard').innerHTML = '<div class="loader">Загрузка данных...</div>';
+            
+            try {
+                // Загрузка новых данных
+                const transactions = await fetchTransactions();
+                await saveTransactions(transactions);
+                
+                // Расчет лидерборда
+                const leaderboard = await calculateLeaderboard();
+                
+                // Отображение результатов
+                renderLeaderboard(leaderboard);
+                
+                // Обновление времени
+                document.getElementById('lastUpdate').textContent = 
+                    `Последнее обновление: ${new Date().toLocaleString()}`;
+                
+            } catch (error) {
+                document.getElementById('leaderboard').innerHTML = 
+                    `<div class="error">Ошибка: ${error.message}</div>`;
+            }
+        }
+
+        // Отображение лидерборда
+        function renderLeaderboard(data) {
+            if (data.length === 0) {
+                document.getElementById('leaderboard').innerHTML = '<p>Нет данных для отображения</p>';
+                return;
+            }
+            
+            let html = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Место</th>
+                            <th>Кошелек</th>
+                            <th>Сумма (TON)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+            
+            data.forEach(([wallet, amount], index) => {
+                const medalClass = index === 0 ? 'medal-1' : 
+                                 index === 1 ? 'medal-2' : 
+                                 index === 2 ? 'medal-3' : '';
+                
+                html += `
+                    <tr>
+                        <td>${index + 1}</td>
+                        <td class="${medalClass}">${wallet}</td>
+                        <td>${amount.toFixed(2)}</td>
+                    </tr>
+                `;
+            });
+            
+            html += `
+                    </tbody>
+                </table>
+            `;
+            
+            document.getElementById('leaderboard').innerHTML = html;
+        }
+
+        // Инициализация приложения
+        document.addEventListener('DOMContentLoaded', async () => {
+            await initDB;
+            
+            // Загрузка данных при старте
+            updateData();
+            
+            // Автоматическое обновление каждые 5 минут
+            setInterval(updateData, UPDATE_INTERVAL);
+            
+            // Кнопка ручного обновления
+            document.getElementById('loadData').addEventListener('click', updateData);
+        });
+    </script>
+</body>
+</html>
